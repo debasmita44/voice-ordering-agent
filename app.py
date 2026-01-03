@@ -17,16 +17,7 @@ ASSISTANT_NAME = "Plato"
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    
-    # Configure generation settings for better responses
-    generation_config = {
-        "temperature": 0.9,
-        "top_p": 0.95,
-        "top_k": 40,
-        "max_output_tokens": 200,
-    }
-    
-    model = genai.GenerativeModel('gemini-2.5-flash', generation_config=generation_config)
+    model = genai.GenerativeModel('gemini-2.5-flash')
 else:
     print("WARNING: GEMINI_API_KEY not found. Please set it in environment variables.")
     model = None
@@ -47,7 +38,7 @@ MENU = {
     'milkshake': {'name': 'Milkshake', 'price': 5.99}
 }
 
-# Store cart in memory
+# Store cart in memory (in production, use a database)
 carts = {}
 conversation_history = {}
 
@@ -57,7 +48,7 @@ def is_greeting_or_casual(text):
         r'^hi+$', r'^hello+$', r'^hey+$', r'^good morning$', r'^good afternoon$',
         r'^good evening$', r'^how are you$', r'^thanks$', r'^thank you$',
         r'^okay$', r'^ok$', r'^yes$', r'^no$', r'^sure$', r'^alright$',
-        r'^please$'
+        r'^please$', r'^please.*'
     ]
     
     text_lower = text.lower().strip()
@@ -73,56 +64,55 @@ def extract_order_with_gemini(user_text, conversation_context=""):
         return []
     
     if not model:
-        return fallback_extract_order(user_text)
+        return []
     
-    menu_items_list = list(MENU.keys())
-    menu_text = ", ".join(menu_items_list)
+    menu_items = ', '.join(MENU.keys())
     
-    prompt = f"""Extract food items and quantities from this order.
+    context_info = ""
+    if conversation_context:
+        context_info = f"\n\nConversation context:\n{conversation_context}"
+    
+    prompt = f"""You are an AI order assistant. Extract ONLY actual food order items and quantities from the user's message.
 
-Available items: {menu_text}
+Available menu items: {menu_items}
 
-Customer said: "{user_text}"
+User said: "{user_text}"{context_info}
 
-Rules:
-- Match items even with "a", "an", "the" prefixes
-- "a burger" = burger
-- "two burgers" = 2 burgers
-- Default quantity is 1
-- Return empty array [] if no valid items found
+IMPORTANT RULES:
+1. ONLY extract items that are clear food orders
+2. IGNORE greetings like "hello", "hi", "hey", "please"
+3. IGNORE casual responses like "yes", "no", "okay"
+4. If the user is just chatting or greeting, return: []
+5. Look for implicit orders like "I'll have", "give me", "can I get"
 
-Return ONLY valid JSON array, no markdown, no explanation:
-[{{"item": "exact_menu_item", "quantity": number}}]
+Return ONLY a JSON array with this exact format (no other text, no markdown):
+[{{"item": "item_name", "quantity": number}}]
 
 Examples:
-"a burger" -> [{{"item": "burger", "quantity": 1}}]
-"two burgers and pizza" -> [{{"item": "burger", "quantity": 2}}, {{"item": "pizza", "quantity": 1}}]
-"hello" -> []
+- "I want two burgers and a pizza" -> [{{"item": "burger", "quantity": 2}}, {{"item": "pizza", "quantity": 1}}]
+- "Can I get three fries" -> [{{"item": "fries", "quantity": 3}}]
+- "please" -> []
+- "hello hello" -> []
 
-JSON response:"""
+Response:"""
 
     try:
         response = model.generate_content(prompt)
         response_text = response.text.strip()
         
-        # Remove markdown code blocks
-        response_text = re.sub(r'```json\s*', '', response_text)
-        response_text = re.sub(r'```\s*', '', response_text)
-        
-        # Extract JSON
-        json_match = re.search(r'\[.*?\]', response_text, re.DOTALL)
+        # Extract JSON from response
+        json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
         if json_match:
             response_text = json_match.group(0)
         
         items = json.loads(response_text)
         
-        # Validate and normalize items
+        # Validate items against menu
         valid_items = []
         for item in items:
-            item_name = item.get('item', '').lower().strip()
+            item_name = item.get('item', '').lower()
             quantity = item.get('quantity', 1)
             
-            # Try exact match first
             if item_name in MENU:
                 valid_items.append({
                     'key': item_name,
@@ -130,59 +120,12 @@ JSON response:"""
                     'price': MENU[item_name]['price'],
                     'quantity': quantity
                 })
-            else:
-                # Try fuzzy match
-                for menu_key in MENU.keys():
-                    if menu_key in item_name or item_name in menu_key:
-                        valid_items.append({
-                            'key': menu_key,
-                            'name': MENU[menu_key]['name'],
-                            'price': MENU[menu_key]['price'],
-                            'quantity': quantity
-                        })
-                        break
         
         return valid_items
     
     except Exception as e:
-        print(f"Gemini extraction error: {e}")
-        return fallback_extract_order(user_text)
-
-def fallback_extract_order(user_text):
-    """Simple fallback order extraction using regex"""
-    items = []
-    text_lower = user_text.lower()
-    
-    # Common quantity words
-    quantity_map = {
-        'a': 1, 'an': 1, 'one': 1,
-        'two': 2, 'three': 3, 'four': 4, 'five': 5,
-        'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10
-    }
-    
-    for menu_key in MENU.keys():
-        # Check if item is in text
-        if menu_key in text_lower:
-            quantity = 1
-            
-            # Look for quantity before the item
-            pattern = r'(\w+)\s+' + menu_key
-            match = re.search(pattern, text_lower)
-            if match:
-                qty_word = match.group(1)
-                if qty_word in quantity_map:
-                    quantity = quantity_map[qty_word]
-                elif qty_word.isdigit():
-                    quantity = int(qty_word)
-            
-            items.append({
-                'key': menu_key,
-                'name': MENU[menu_key]['name'],
-                'price': MENU[menu_key]['price'],
-                'quantity': quantity
-            })
-    
-    return items
+        print(f"Gemini error: {e}")
+        return []
 
 def generate_response_with_gemini(cart_items, added_items, total, action='add', user_text='', conversation_context=''):
     """Generate natural response using Gemini"""
@@ -192,85 +135,114 @@ def generate_response_with_gemini(cart_items, added_items, total, action='add', 
     
     cart_summary = ""
     if cart_items:
-        cart_summary = ", ".join([f"{item['quantity']} {item['name']}" for item in cart_items])
+        cart_summary = "Current cart: " + ", ".join([f"{item['quantity']} {item['name']}" for item in cart_items])
+    
+    context_info = ""
+    if conversation_context:
+        context_info = f"\n\nRecent conversation:\n{conversation_context}"
     
     if action == 'welcome':
-        prompt = f"""You're {ASSISTANT_NAME}, a friendly server at {RESTAURANT_NAME}. Write a warm 2-sentence welcome:
-1. Greet them to {RESTAURANT_NAME}
-2. Ask what they'd like
+        prompt = f"""You are {ASSISTANT_NAME}, a warm and friendly human server at {RESTAURANT_NAME}. 
 
-Be casual, use contractions. Example: "Hey! Welcome to {RESTAURANT_NAME}! I'm {ASSISTANT_NAME}. What can I get you today?"
+Generate a natural welcome greeting (2-3 sentences) as if greeting a guest who just walked in. You should:
+1. Welcome them warmly to {RESTAURANT_NAME}
+2. Introduce yourself naturally as {ASSISTANT_NAME}
+3. Ask what they would like to order conversationally
 
-Response (just the greeting, no quotes):"""
+Speak like a real person, not a robot. Use contractions.
+
+Example: "Hey there! Welcome to {RESTAURANT_NAME}! I'm {ASSISTANT_NAME}, and I'll be taking care of you today. What can I get started for you?"
+
+Your response (no extra formatting):"""
     
     elif action == 'greeting':
-        prompt = f"""You're {ASSISTANT_NAME}, a server at {RESTAURANT_NAME}.
+        prompt = f"""You are {ASSISTANT_NAME}, a warm friendly server at {RESTAURANT_NAME}.
 
-Customer: "{user_text}"
+Customer said: "{user_text}"
 
-Respond in 1 sentence. Be friendly, then ask what they want to order.
+This is casual conversation, not an order. Respond naturally (1-2 sentences) as a real server would:
+- Greet them back warmly if they greet you
+- If they say please/thanks, acknowledge kindly
+- Then redirect to helping them order
 
-Example: "Hey! What sounds good to you?"
+{context_info}
 
-Response:"""
+Speak naturally. Use contractions.
+
+Examples:
+- "Hey! Good to see you! So what sounds good to you today?"
+- "Of course! Happy to help. What are you in the mood for?"
+
+Your response (no extra formatting):"""
     
     elif action == 'add' and added_items:
         items_text = ', '.join([f"{item['quantity']} {item['name']}" for item in added_items])
         
-        prompt = f"""You're {ASSISTANT_NAME}, a server at {RESTAURANT_NAME}.
+        prompt = f"""You are {ASSISTANT_NAME}, a warm friendly server at {RESTAURANT_NAME}.
 
-Just added: {items_text}
-Cart now has: {cart_summary}
-Total: ${total:.2f}
+Customer just ordered: {items_text}
+{cart_summary}
+New total: ${total:.2f}
 
-Write 2-3 sentences:
-1. Confirm what was added (be enthusiastic!)
-2. Say the total
-3. Ask if they want more
+Generate natural confirmation (2-3 sentences) like a real server:
+1. Acknowledge their order enthusiastically 
+2. Confirm what you added
+3. Tell them the new total
+4. Ask if they want anything else
 
-Be casual, conversational. Use contractions.
+{context_info}
 
-Example: "Nice! Got your {items_text}. That's ${total:.2f} so far. Want anything else?"
+Speak naturally with personality. Use contractions.
 
-Response (no quotes):"""
+Examples:
+- "Awesome choice! I've got your {items_text} coming right up. That brings you to ${total:.2f}. Anything else I can grab for you?"
+- "Perfect! Added {items_text}. You're at ${total:.2f} so far. Want to add anything else?"
+
+Your response (no extra formatting):"""
     
     elif action == 'no_items':
-        prompt = f"""You're {ASSISTANT_NAME}, a server at {RESTAURANT_NAME}.
+        prompt = f"""You are {ASSISTANT_NAME}, a warm friendly server at {RESTAURANT_NAME}.
 
-Customer: "{user_text}"
+Customer said: "{user_text}"
 
-You didn't understand their order. Politely ask them to repeat (1 sentence).
+You didn't catch any valid menu items. Respond naturally (1-2 sentences):
+- Politely say you didn't catch that
+- Offer to help with the menu
+- Keep it friendly
 
-Example: "Sorry, didn't catch that! What would you like?"
+{context_info}
 
-Response:"""
+Examples:
+- "Sorry, I didn't quite catch that! Could you tell me again what you'd like?"
+- "Hmm, I'm not sure I got that right. What would you like to order?"
+
+Your response (no extra formatting):"""
     
     elif action == 'checkout':
-        prompt = f"""You're {ASSISTANT_NAME}, a server at {RESTAURANT_NAME}.
+        prompt = f"""You are {ASSISTANT_NAME}, a warm friendly server at {RESTAURANT_NAME}.
 
-Customer is checking out.
-Total: ${total:.2f}
+Customer is ready to complete their order.
+Final total: ${total:.2f}
 
-Write 2-3 sentences:
-1. Thank them
-2. Confirm total
-3. Say food will be ready soon
+Generate warm closing (2-3 sentences):
+1. Thank them sincerely
+2. Confirm the total
+3. Let them know food will be ready soon
 
-Be warm and appreciative.
+{context_info}
 
-Example: "Awesome! Thanks for ordering. Your total is ${total:.2f}. We'll have that ready in a few minutes!"
+Examples:
+- "Awesome! Thanks so much for your order. Your total comes to ${total:.2f}. We'll have that ready for you in just a few minutes!"
+- "Perfect! That'll be ${total:.2f}. Thanks for ordering with us - your food will be right out!"
 
-Response (no quotes):"""
+Your response (no extra formatting):"""
     
     else:
-        return "What can I get for you?"
+        return "How can I help you today?"
     
     try:
         response = model.generate_content(prompt)
-        result = response.text.strip()
-        # Remove quotes if present
-        result = result.strip('"\'')
-        return result
+        return response.text.strip()
     
     except Exception as e:
         print(f"Gemini response error: {e}")
@@ -279,17 +251,17 @@ Response (no quotes):"""
 def get_fallback_response(action, added_items=None, total=0):
     """Fallback responses when Gemini is unavailable"""
     if action == 'welcome':
-        return f"Hey! Welcome to {RESTAURANT_NAME}! I'm {ASSISTANT_NAME}. What can I get you today?"
+        return f"Hey there! Welcome to {RESTAURANT_NAME}! I'm {ASSISTANT_NAME}, and I'll be helping you today. What can I get started for you?"
     elif action == 'greeting':
-        return "Hey! What sounds good to you?"
+        return "Hey! Good to see you! What sounds good to you today?"
     elif action == 'add' and added_items:
         items_text = ', '.join([f"{item['quantity']} {item['name']}" for item in added_items])
-        return f"Nice! Got your {items_text}. That's ${total:.2f} so far. Want anything else?"
+        return f"Awesome! I've got {items_text} for you. That's ${total:.2f} total. Anything else?"
     elif action == 'no_items':
-        return "Sorry, didn't catch that! What would you like?"
+        return "Sorry, I didn't catch that! What would you like to order?"
     elif action == 'checkout':
-        return f"Awesome! Thanks for ordering. Your total is ${total:.2f}. We'll have that ready soon!"
-    return "What can I get for you?"
+        return f"Perfect! Your total is ${total:.2f}. We'll have that ready for you soon. Thanks!"
+    return "How can I help you?"
 
 @app.route('/', methods=['GET'])
 def home():
@@ -320,8 +292,6 @@ def process_order():
     data = request.json
     user_text = data.get('text', '')
     session_id = data.get('session_id', 'default')
-    
-    print(f"Processing order - User said: '{user_text}'")
     
     if session_id not in carts:
         carts[session_id] = []
@@ -373,7 +343,7 @@ def process_order():
     
     if any(phrase in lower_text for phrase in checkout_phrases):
         if not carts[session_id]:
-            response_text = "Your cart's empty! What would you like?"
+            response_text = "Your cart is empty! What would you like to order?"
             conversation_history[session_id].append(f"{ASSISTANT_NAME}: {response_text}")
             
             return jsonify({
@@ -399,8 +369,6 @@ def process_order():
     # Extract items
     extracted_items = extract_order_with_gemini(user_text, context)
     
-    print(f"Extracted items: {extracted_items}")
-    
     if not extracted_items:
         response_text = generate_response_with_gemini([], [], 0, action='no_items', user_text=user_text, conversation_context=context)
         conversation_history[session_id].append(f"{ASSISTANT_NAME}: {response_text}")
@@ -424,9 +392,6 @@ def process_order():
     total = sum(item['price'] * item['quantity'] for item in carts[session_id])
     response_text = generate_response_with_gemini(carts[session_id], extracted_items, total, action='add', conversation_context=context)
     conversation_history[session_id].append(f"{ASSISTANT_NAME}: {response_text}")
-    
-    print(f"Cart updated: {carts[session_id]}")
-    print(f"Response: {response_text}")
     
     return jsonify({
         'success': True,
