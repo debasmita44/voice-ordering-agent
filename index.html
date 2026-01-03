@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice AI Ordering Agent - Twilight Cafe</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes pulse-ring {
+            0% {
+                transform: scale(1);
+                opacity: 1;
+            }
+            100% {
+                transform: scale(1.5);
+                opacity: 0;
+            }
+        }
+        .pulse-ring {
+            animation: pulse-ring 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-orange-50 to-red-50 min-h-screen">
+    <div class="container mx-auto p-4 max-w-6xl">
+        <!-- Header -->
+        <header class="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <h1 class="text-3xl font-bold text-gray-800 flex items-center gap-3">
+                🎤 <span id="restaurant-name">Twilight Cafe</span> - Voice Ordering
+            </h1>
+            <p class="text-gray-600 mt-2">Click the microphone and tell <span id="assistant-name-header">Plato</span> what you'd like to order!</p>
+        </header>
+
+        <div class="grid md:grid-cols-3 gap-6">
+            <!-- Menu Section -->
+            <div class="md:col-span-1 bg-white rounded-lg shadow-lg p-6">
+                <h2 class="text-xl font-bold text-gray-800 mb-4">📋 Menu</h2>
+                <div id="menu-list" class="space-y-2 max-h-96 overflow-y-auto">
+                    <!-- Menu items will be loaded here -->
+                </div>
+            </div>
+
+            <!-- Main Section -->
+            <div class="md:col-span-2 space-y-6">
+                <!-- Voice Control -->
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <div class="flex flex-col items-center space-y-4">
+                        <div class="relative">
+                            <button id="mic-button" 
+                                    class="w-24 h-24 rounded-full flex items-center justify-center transition-all bg-orange-500 hover:bg-orange-600 shadow-lg relative z-10">
+                                <svg id="mic-icon" class="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path>
+                                </svg>
+                            </button>
+                            <div id="pulse-ring" class="absolute inset-0 rounded-full bg-red-500 opacity-0"></div>
+                        </div>
+                        
+                        <div class="text-center">
+                            <p id="status-text" class="text-lg font-semibold text-gray-700">Initializing...</p>
+                            <p id="transcript-text" class="text-sm text-gray-500 mt-2 min-h-6"></p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Conversation Log -->
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <h2 class="text-xl font-bold text-gray-800 mb-4">💬 Conversation</h2>
+                    <div id="conversation-log" class="space-y-3 max-h-64 overflow-y-auto">
+                        <!-- Conversation will appear here -->
+                    </div>
+                </div>
+
+                <!-- Cart -->
+                <div class="bg-white rounded-lg shadow-lg p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-xl font-bold text-gray-800 flex items-center gap-2">
+                            🛒 Your Cart
+                        </h2>
+                        <button id="clear-cart-btn" 
+                                class="px-3 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition hidden">
+                            🗑️ Clear
+                        </button>
+                    </div>
+                    
+                    <div id="cart-items" class="space-y-3">
+                        <p class="text-gray-500 text-center py-8">Your cart is empty</p>
+                    </div>
+
+                    <button id="checkout-btn" 
+                            class="w-full mt-4 py-3 bg-green-500 text-white font-semibold rounded-lg hover:bg-green-600 transition hidden">
+                        Complete Order
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:5000/api';
+        const SESSION_ID = 'user_' + Date.now();
+        
+        let recognition = null;
+        let isListening = false;
+        let isSpeaking = false;
+        let speechQueue = [];
+        let isProcessingSpeech = false;
+        let assistantName = 'Plato';
+        let restaurantName = 'Twilight Cafe';
+        let orderJustCompleted = false;
+
+        // Load configuration
+        async function loadConfig() {
+            try {
+                const response = await fetch(API_URL + '/config');
+                const data = await response.json();
+                assistantName = data.assistant_name;
+                restaurantName = data.restaurant_name;
+                
+                // Update UI
+                document.getElementById('restaurant-name').textContent = restaurantName;
+                document.getElementById('assistant-name-header').textContent = assistantName;
+                document.title = 'Voice AI Ordering Agent - ' + restaurantName;
+            } catch (error) {
+                console.error('Error loading config:', error);
+            }
+        }
+
+        // Initialize Speech Recognition
+        function initSpeechRecognition() {
+            if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                recognition = new SpeechRecognition();
+                recognition.continuous = false;
+                recognition.interimResults = false;
+                recognition.lang = 'en-US';
+
+                recognition.onresult = async (event) => {
+                    const transcript = event.results[0][0].transcript;
+                    document.getElementById('transcript-text').textContent = 'You said: "' + transcript + '"';
+                    addToLog('user', transcript);
+                    await processOrder(transcript);
+                };
+
+                recognition.onerror = (event) => {
+                    console.error('Speech recognition error:', event.error);
+                    stopListening();
+                    
+                    if (event.error !== 'no-speech' && event.error !== 'aborted') {
+                        addToLog('system', 'Sorry, I had trouble hearing you. Please try again.');
+                        queueSpeech('Sorry, I had trouble hearing you. Please try again.');
+                    }
+                };
+
+                recognition.onend = () => {
+                    stopListening();
+                };
+
+                return true;
+            } else {
+                alert('Speech recognition is not supported in this browser. Please use Chrome or Edge.');
+                return false;
+            }
+        }
+
+        // Speech Queue System - ensures messages play in order without interruption
+        function queueSpeech(text) {
+            speechQueue.push(text);
+            if (!isProcessingSpeech) {
+                processSpeechQueue();
+            }
+        }
+
+        async function processSpeechQueue() {
+            if (speechQueue.length === 0) {
+                isProcessingSpeech = false;
+                isSpeaking = false;
+                updateStatus('Click to speak');
+                return;
+            }
+
+            isProcessingSpeech = true;
+            isSpeaking = true;
+            updateStatus('Speaking...');
+
+            const text = speechQueue.shift();
+            await speakText(text);
+            
+            // Process next in queue
+            processSpeechQueue();
+        }
+
+        // Text-to-Speech - returns a promise
+        function speakText(text) {
+            return new Promise((resolve) => {
+                if ('speechSynthesis' in window) {
+                    // Cancel only if we're forcing a new speech session
+                    const utterance = new SpeechSynthesisUtterance(text);
+                    utterance.rate = 0.9;
+                    utterance.pitch = 1;
+                    utterance.volume = 1;
+                    
+                    utterance.onend = () => {
+                        resolve();
+                    };
+
+                    utterance.onerror = (event) => {
+                        console.error('Speech synthesis error:', event);
+                        resolve();
+                    };
+
+                    window.speechSynthesis.speak(utterance);
+                } else {
+                    resolve();
+                }
+            });
+        }
+
+        // Start listening - only if not already speaking
+        function startListening() {
+            if (recognition && !isListening && !isSpeaking) {
+                isListening = true;
+                document.getElementById('transcript-text').textContent = '';
+                updateMicButton(true);
+                updateStatus('Listening...');
+                recognition.start();
+            } else if (isSpeaking) {
+                // Show message that we're still speaking
+                updateStatus('Please wait, I\'m still speaking...');
+            }
+        }
+
+        // Stop listening
+        function stopListening() {
+            if (recognition && isListening) {
+                isListening = false;
+                recognition.stop();
+                updateMicButton(false);
+                if (!isSpeaking) {
+                    updateStatus('Processing...');
+                }
+            }
+        }
+
+        // Update mic button appearance
+        function updateMicButton(listening) {
+            const button = document.getElementById('mic-button');
+            const pulseRing = document.getElementById('pulse-ring');
+            
+            if (listening) {
+                button.classList.add('bg-red-500', 'animate-pulse');
+                button.classList.remove('bg-orange-500');
+                pulseRing.classList.add('pulse-ring');
+                pulseRing.classList.remove('opacity-0');
+            } else {
+                button.classList.remove('bg-red-500', 'animate-pulse');
+                button.classList.add('bg-orange-500');
+                pulseRing.classList.remove('pulse-ring');
+                pulseRing.classList.add('opacity-0');
+            }
+        }
+
+        // Update status text
+        function updateStatus(text) {
+            document.getElementById('status-text').textContent = text;
+        }
+
+        // Add message to conversation log
+        function addToLog(sender, message) {
+            const log = document.getElementById('conversation-log');
+            const messageDiv = document.createElement('div');
+            
+            let bgColor = 'bg-gray-100';
+            let alignment = '';
+            let senderLabel = 'System';
+            
+            if (sender === 'user') {
+                bgColor = 'bg-blue-100';
+                alignment = 'ml-8';
+                senderLabel = 'You';
+            } else if (sender === 'agent') {
+                bgColor = 'bg-green-100';
+                alignment = 'mr-8';
+                senderLabel = assistantName;
+            }
+            
+            messageDiv.className = 'p-3 rounded-lg ' + bgColor + ' ' + alignment;
+            messageDiv.innerHTML = '<p class="text-sm font-semibold text-gray-600 mb-1">' + senderLabel + '</p>' +
+                                   '<p class="text-gray-800">' + message + '</p>';
+            
+            log.appendChild(messageDiv);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        // Process order via backend
+        async function processOrder(text) {
+            try {
+                updateStatus('Processing...');
+                
+                const response = await fetch(API_URL + '/process-order', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        text: text,
+                        session_id: SESSION_ID
+                    })
+                });
+
+                const data = await response.json();
+                
+                addToLog('agent', data.response);
+                queueSpeech(data.response);
+                updateCart(data.cart, data.total);
+                
+                // If order was completed, wait 8 seconds then prompt for new order
+                if (data.checkout && data.clear_cart) {
+                    orderJustCompleted = true;
+                    
+                    setTimeout(async () => {
+                        if (orderJustCompleted) {
+                            try {
+                                const newOrderResponse = await fetch(API_URL + '/new-order');
+                                const newOrderData = await newOrderResponse.json();
+                                addToLog('agent', newOrderData.response);
+                                queueSpeech(newOrderData.response);
+                                orderJustCompleted = false;
+                            } catch (error) {
+                                console.error('Error getting new order prompt:', error);
+                            }
+                        }
+                    }, 8000); // Wait 8 seconds after checkout
+                }
+                
+            } catch (error) {
+                console.error('Error processing order:', error);
+                addToLog('system', 'Sorry, there was an error processing your order.');
+                queueSpeech('Sorry, there was an error processing your order.');
+            }
+        }
+
+        // Load menu from backend
+        async function loadMenu() {
+            try {
+                const response = await fetch(API_URL + '/menu');
+                const data = await response.json();
+                const menuList = document.getElementById('menu-list');
+                menuList.innerHTML = '';
+                
+                Object.entries(data.menu).forEach(([key, item]) => {
+                    const menuItem = document.createElement('div');
+                    menuItem.className = 'flex justify-between items-center p-3 bg-gray-50 rounded hover:bg-gray-100 transition';
+                    menuItem.innerHTML = '<span class="font-medium text-gray-700">' + item.name + '</span>' +
+                                        '<span class="text-orange-600 font-semibold">$' + item.price.toFixed(2) + '</span>';
+                    menuList.appendChild(menuItem);
+                });
+            } catch (error) {
+                console.error('Error loading menu:', error);
+            }
+        }
+
+        // Update cart display
+        function updateCart(cart, total) {
+            const cartItems = document.getElementById('cart-items');
+            const clearBtn = document.getElementById('clear-cart-btn');
+            const checkoutBtn = document.getElementById('checkout-btn');
+            
+            if (cart.length === 0) {
+                cartItems.innerHTML = '<p class="text-gray-500 text-center py-8">Your cart is empty</p>';
+                clearBtn.classList.add('hidden');
+                checkoutBtn.classList.add('hidden');
+            } else {
+                let html = '';
+                cart.forEach(item => {
+                    html += '<div class="flex justify-between items-center p-3 bg-gray-50 rounded">' +
+                            '<div>' +
+                            '<span class="font-medium text-gray-700">' + item.name + '</span>' +
+                            '<span class="text-gray-500 text-sm ml-2">x' + item.quantity + '</span>' +
+                            '</div>' +
+                            '<span class="text-orange-600 font-semibold">$' + (item.price * item.quantity).toFixed(2) + '</span>' +
+                            '</div>';
+                });
+                
+                html += '<div class="border-t pt-3 mt-3">' +
+                        '<div class="flex justify-between items-center">' +
+                        '<span class="text-lg font-bold text-gray-800">Total:</span>' +
+                        '<span class="text-2xl font-bold text-orange-600">$' + total.toFixed(2) + '</span>' +
+                        '</div>' +
+                        '</div>';
+                
+                cartItems.innerHTML = html;
+                clearBtn.classList.remove('hidden');
+                checkoutBtn.classList.remove('hidden');
+            }
+        }
+
+        // Load welcome message
+        async function loadWelcome() {
+            try {
+                updateStatus('Loading...');
+                const response = await fetch(API_URL + '/welcome');
+                const data = await response.json();
+                
+                // Wait a bit to ensure everything is loaded
+                setTimeout(() => {
+                    addToLog('agent', data.response);
+                    queueSpeech(data.response);
+                }, 500);
+                
+            } catch (error) {
+                console.error('Error loading welcome:', error);
+                const fallbackMsg = "Hello! Welcome to " + restaurantName + ". I'm " + assistantName + ", your order assistant. What would you like to order today?";
+                setTimeout(() => {
+                    addToLog('agent', fallbackMsg);
+                    queueSpeech(fallbackMsg);
+                }, 500);
+            }
+        }
+
+        // Event Listeners
+        document.getElementById('mic-button').addEventListener('click', () => {
+            if (isListening) {
+                stopListening();
+            } else {
+                // Cancel any new order prompts if user starts ordering
+                orderJustCompleted = false;
+                startListening();
+            }
+        });
+
+        document.getElementById('clear-cart-btn').addEventListener('click', async () => {
+            orderJustCompleted = false;
+            await processOrder('clear cart');
+        });
+
+        document.getElementById('checkout-btn').addEventListener('click', async () => {
+            await processOrder('complete my order');
+        });
+
+        // Initialize on load
+        window.addEventListener('load', async () => {
+            updateStatus('Initializing...');
+            await loadConfig();
+            const recognitionReady = initSpeechRecognition();
+            await loadMenu();
+            
+            if (recognitionReady) {
+                await loadWelcome();
+            }
+        });
+    </script>
+</body>
+</html>
