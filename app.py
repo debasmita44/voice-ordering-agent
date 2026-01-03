@@ -26,7 +26,7 @@ if GEMINI_API_KEY:
         "max_output_tokens": 200,
     }
     
-    model = genai.GenerativeModel('gemini-pro', generation_config=generation_config)
+    model = genai.GenerativeModel('gemini-2.5-flash', generation_config=generation_config)
 else:
     print("WARNING: GEMINI_API_KEY not found. Please set it in environment variables.")
     model = None
